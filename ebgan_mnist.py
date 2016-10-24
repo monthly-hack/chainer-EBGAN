@@ -1,6 +1,11 @@
 # coding: UTF-8
 from __future__ import print_function
 import argparse
+import os
+import datetime
+import shutil
+import glob
+import re
 
 import chainer
 import chainer.functions as F
@@ -14,16 +19,10 @@ from chainer.training import extensions
 import six
 
 import numpy as np
-import glob
-import re
 from PIL import Image
 import matplotlib as mpl
 mpl.use('Agg')
 from matplotlib import pylab as plt
-
-import os
-import datetime
-import shutil
 
 
 # Network definition
@@ -31,15 +30,15 @@ class discriminator(chainer.Chain):
 
     def __init__(self, n_units, n_canvas):
         super(discriminator, self).__init__(
-            fc1=L.Linear(784, 1024, wscale=0.002, bias=0),
-            bn1=L.BatchNormalization(1024),
-            fc2=L.Linear(1024, 1024, wscale=0.002, bias=0),
-            bn2=L.BatchNormalization(1024),
-            fc3=L.Linear(1024, 1024, wscale=0.002, bias=0),
-            bn3=L.BatchNormalization(1024),
-            fc4=L.Linear(1024, 1024, wscale=0.002, bias=0),
-            bn4=L.BatchNormalization(1024),
-            fc5=L.Linear(1024, n_canvas * n_canvas, wscale=0.002, bias=0),
+            fc1=L.Linear(n_canvas ** 2, n_units, wscale=0.002, bias=0),
+            bn1=L.BatchNormalization(n_units),
+            fc2=L.Linear(n_units, n_units, wscale=0.002, bias=0),
+            bn2=L.BatchNormalization(n_units),
+            fc3=L.Linear(n_units, n_units, wscale=0.002, bias=0),
+            bn3=L.BatchNormalization(n_units),
+            fc4=L.Linear(n_units, n_units, wscale=0.002, bias=0),
+            bn4=L.BatchNormalization(n_units),
+            fc5=L.Linear(n_units, n_canvas ** 2, wscale=0.002, bias=0),
         )
         self.n_canvas = n_canvas
         self.n_saved = 1
@@ -82,15 +81,15 @@ class generator(chainer.Chain):
 
     def __init__(self, n_z, n_units, n_canvas, batchsize, xp):
         super(generator, self).__init__(
-            fc1=L.Linear(n_z, 3200, wscale=0.02, bias=0),
-            bn1=L.BatchNormalization(3200),
-            fc2=L.Linear(3200, 3200, wscale=0.02, bias=0),
-            bn2=L.BatchNormalization(3200),
-            fc3=L.Linear(3200, 3200, wscale=0.02, bias=0),
-            bn3=L.BatchNormalization(3200),
-            fc4=L.Linear(3200, 3200, wscale=0.02, bias=0),
-            bn4=L.BatchNormalization(3200),
-            fc5=L.Linear(3200, n_canvas * n_canvas, wscale=0.02, bias=0),
+            fc1=L.Linear(n_z, n_units, wscale=0.02, bias=0),
+            bn1=L.BatchNormalization(n_units),
+            fc2=L.Linear(n_units, n_units, wscale=0.02, bias=0),
+            bn2=L.BatchNormalization(n_units),
+            fc3=L.Linear(n_units, n_units, wscale=0.02, bias=0),
+            bn3=L.BatchNormalization(n_units),
+            fc4=L.Linear(n_units, n_units, wscale=0.02, bias=0),
+            bn4=L.BatchNormalization(n_units),
+            fc5=L.Linear(n_units, n_canvas ** 2, wscale=0.02, bias=0),
         )
         self.n_canvas = n_canvas
         self.batchsize = batchsize
@@ -100,17 +99,15 @@ class generator(chainer.Chain):
 
     def __call__(self, train=True, n_image=None):
         if train:
-            z = chainer.Variable(
-                self._xp.random.uniform(-1, 1, (self.batchsize,
-                                                self.n_z)).astype(np.float32))
+            z = chainer.Variable(self._xp.random.uniform(
+                -1, 1, (self.batchsize, self.n_z)).astype(np.float32))
         else:
-            z = chainer.Variable(
-                self._xp.random.uniform(-1, 1, (n_image * n_image,
-                                                self.n_z)).astype(np.float32))
-        h1 = F.relu(F.dropout(self.bn1(self.fc1(z)), train=train))
-        h2 = F.relu(F.dropout(self.bn2(self.fc2(h1)), train=train))
-        h3 = F.relu(F.dropout(self.bn3(self.fc3(h2)), train=train))
-        h4 = F.relu(F.dropout(self.bn4(self.fc4(h3)), train=train))
+            z = chainer.Variable(self._xp.random.uniform(
+                -1, 1, (n_image * n_image, self.n_z)).astype(np.float32))
+        h1 = F.relu(self.bn1(self.fc1(z)))
+        h2 = F.relu(self.bn2(self.fc2(h1)))
+        h3 = F.relu(self.bn3(self.fc3(h2)))
+        h4 = F.relu(self.bn4(self.fc4(h3)))
         y = self.fc5(h4)
         if train:
             return y
@@ -135,9 +132,9 @@ class generator(chainer.Chain):
 class gan_updater(training.StandardUpdater):
 
     def __init__(self, iterator, discriminator, generator,
-                 optimizer_d, optimizer_g, margin,
+                 optimizer_d, optimizer_g, margin, pt,
                  device, batchsize,
-                 converter=convert.concat_examples, pt=True):
+                 converter=convert.concat_examples):
         if isinstance(iterator, iterator_module.Iterator):
             iterator = {'main': iterator}
         self._iterators = iterator
@@ -145,13 +142,22 @@ class gan_updater(training.StandardUpdater):
         self.generator = generator
         self._optimizers = {'discriminator': optimizer_d,
                             'generator': optimizer_g}
-        self.margin = margin
-        self.pt = pt
         self.device = device
+        self.loss_weight = batchsize / len(self._iterators['main'].dataset)
         self.converter = converter
         self.iteration = 0
+        self.margin = margin
+        self.pt = pt
+        self.sum_loss_dis = 0
+        self.sum_loss_gen = 0
+        self.sum_pt = 0
 
     def update_core(self):
+        if self._iterators['main'].is_new_epoch:
+            self.sum_loss_dis = 0
+            self.sum_loss_gen = 0
+            self.sum_pt = 0
+
         batch = self._iterators['main'].next()
         in_arrays = self.converter(batch, self.device)
 
@@ -165,20 +171,26 @@ class gan_updater(training.StandardUpdater):
         loss_gen = F.mean_squared_error(y_generated, generated)
         loss_dis += F.relu(self.margin - loss_gen)
 
+        self.sum_loss_dis += self.loss_weight * loss_dis.data
+        self.sum_loss_gen += self.loss_weight * loss_gen.data
+
         if self.pt:
             s = self.discriminator.encode(generated)
             normalized_s = F.normalize(s)
             cosine_similarity = F.matmul(normalized_s, normalized_s,
                                          transb=True)
-            ptterm = F.sum(cosine_similarity)
-            ptterm /= s.shape[0] * s.shape[0]
-            loss_gen += 0.1 * ptterm
+            pterm = cosine_similarity * cosine_similarity
+            pterm = F.sum(pterm)
+            pterm /= s.shape[0] * s.shape[0]
+            loss_gen += 0.1 * pterm
+            self.sum_pt += self.loss_weight * pterm.data
+
+        reporter.report({'dis/loss': self.sum_loss_dis})
+        reporter.report({'gen/loss': self.sum_loss_gen})
+        reporter.report({'gen/pt': self.sum_pt})
 
         for optimizer in self._optimizers:
             self._optimizers[optimizer].target.cleargrads()
-
-        reporter.report({'dis/loss': loss_dis})
-        reporter.report({'gen/loss': loss_gen})
 
         loss_dis.backward()
         self._optimizers['discriminator'].update()
@@ -191,14 +203,16 @@ def main():
     parser = argparse.ArgumentParser(description='DCGAN')
     parser.add_argument('--batchsize', '-b', type=int, default=100,
                         help='Number of images in each mini-batch')
-    parser.add_argument('--epoch', '-e', type=int, default=10000,
+    parser.add_argument('--epoch', '-e', type=int, default=500,
                         help='Number of sweeps over the dataset to train')
     parser.add_argument('--gpu', '-g', type=int, default=-1,
                         help='GPU ID (negative value indicates CPU)')
     parser.add_argument('--resume', '-r', default='',
                         help='Resume the training from snapshot')
-    parser.add_argument('--unit', '-u', type=int, default=1000,
-                        help='Number of units')
+    parser.add_argument('--unitd', '-ud', type=int, default=1024,
+                        help='Number of units of discriminator')
+    parser.add_argument('--unitg', '-ug', type=int, default=3200,
+                        help='Number of units of generator')
     parser.add_argument('--canvas', '-c', type=int, default=28,
                         help='Size of canvas')
     parser.add_argument('--dimension', '-d', type=int, default=3,
@@ -207,6 +221,8 @@ def main():
                         help='Number of output images')
     parser.add_argument('--margin', '-m', type=int, default=10,
                         help='Margin of loss function')
+    parser.add_argument('--pt', '-p', type=int, default=1,
+                        help='Use of pull-away term')
     args = parser.parse_args()
     xp = cuda.cupy if args.gpu >= 0 else np
 
@@ -220,16 +236,15 @@ def main():
     print('')
 
     # Set up a neural network to train
-    # Classifier reports softmax cross entropy loss and accuracy at every
-    # iteration, which will be used by the PrintReport extension below.
-    dis = discriminator(args.unit, args.canvas)
-    gen = generator(args.dimension, args.unit, args.canvas, args.batchsize, xp)
+    dis = discriminator(args.unitd, args.canvas)
+    gen = generator(args.dimension, args.unitg, args.canvas,
+                    args.batchsize, xp)
     if args.gpu >= 0:
         chainer.cuda.get_device(args.gpu).use()  # Make a specified GPU current
         dis.to_gpu()  # Copy the model to the GPU
         gen.to_gpu()  # Copy the model to the GPU
 
-    # Setup an optimizer
+    # Setup optimizers
     optimizers = {'dis': chainer.optimizers.Adam(alpha=1e-3, beta1=0.5),
                   'gen': chainer.optimizers.Adam(alpha=1e-3, beta1=0.5)}
     optimizers['dis'].setup(dis)
@@ -243,16 +258,15 @@ def main():
     test -= 1
     test = xp.asarray(test[:args.image * args.image])
     data_iter = chainer.iterators.SerialIterator(train, args.batchsize)
-    # Set up a trainer
+
     updater = gan_updater(data_iter, dis, gen,
                           optimizers['dis'], optimizers['gen'], args.margin,
-                          args.gpu, args.batchsize)
+                          args.pt, args.gpu, args.batchsize)
     trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=result)
 
-    # Dump a computational graph from 'loss' variable at the first iteration
-    # The "main" refers to the target link of the "main" optimizer.
-    trainer.extend(extensions.dump_graph('dis/loss'))
-    trainer.extend(extensions.dump_graph('gen/loss'))
+    # trainer.extend(extensions.dump_graph('dis/loss'))
+    # trainer.extend(extensions.dump_graph('gen/loss'))
+    # trainer.extend(extensions.dump_graph('gen/pt'))
 
     # Take a snapshot at each epoch
     trainer.extend(extensions.snapshot(), trigger=(args.epoch, 'epoch'))
@@ -260,13 +274,8 @@ def main():
     # Write a log of evaluation statistics for each epoch
     trainer.extend(extensions.LogReport())
 
-    # Print selected entries of the log to stdout
-    # Here "main" refers to the target link of the "main" optimizer again, and
-    # "validation" refers to the default name of the Evaluator extension.
-    # Entries other than 'epoch' are reported by the Classifier link, called by
-    # either the updater or the evaluator.
     trainer.extend(extensions.PrintReport(
-        ['epoch', 'dis/loss', 'gen/loss']))
+        ['epoch', 'dis/loss', 'gen/loss', 'gen/pt']))
 
     @training.make_extension(trigger=(1, 'epoch'))
     def generate_images(trainer):
