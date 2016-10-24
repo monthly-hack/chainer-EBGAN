@@ -13,9 +13,14 @@ python dcgan_mnist.py -g n
 ```
 
 ## ebgan_mnist.py
-EBGAN with MNIST(use GPU #n).
+EBGAN(with pull-away term) with MNIST(use GPU #n).
 ```
 python dcgan_mnist.py -g n
+```
+
+EBGAN(without pull-away term) with MNIST(use GPU #n).
+```
+python dcgan_mnist.py -g n -pt 0
 ```
 
 <!-- ## gan.py
