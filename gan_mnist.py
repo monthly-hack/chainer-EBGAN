@@ -149,12 +149,11 @@ class gan_updater(training.StandardUpdater):
         reporter.report({'dis/loss': self.sum_loss_dis})
         reporter.report({'gen/loss': self.sum_loss_gen})
 
-        for optimizer in self._optimizers:
-            self._optimizers[optimizer].target.cleargrads()
-
+        self._optimizers['discriminator'].target.cleargrads()
         loss_dis.backward()
         self._optimizers['discriminator'].update()
 
+        self._optimizers['generator'].target.cleargrads()
         loss_gen.backward()
         self._optimizers['generator'].update()
 
